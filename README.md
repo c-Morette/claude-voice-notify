@@ -1,6 +1,6 @@
 # claude-voice-notify
 
-Spoken notifications for [Claude Code](https://code.claude.com) on macOS.
+Spoken notifications for [Claude Code](https://code.claude.com) on **macOS**.
 
 When a session finishes, your Mac says the repository name and reads a short summary that Claude itself wrote at the end of its reply. When a session is waiting for your approval or has a question, it tells you that too. You can work in another window, or away from the screen, and still know which session needs you.
 
@@ -9,48 +9,190 @@ When a session finishes, your Mac says the repository name and reads a short sum
 - One Python script, standard library only. No dependencies, no API key, no second model.
 - Everything runs on your Mac. Nothing goes over the network.
 - English and Brazilian Portuguese.
+- **v0.1 is macOS only.** See [Not on a Mac?](#not-on-a-mac)
 
 **Unofficial.** This is a community plugin, not affiliated with or endorsed by Anthropic.
 
 [Português abaixo](#português)
 
-## Install
+## Contents
 
-Two commands in a terminal:
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [What you will hear](#what-you-will-hear)
+- [Commands](#commands)
+- [Choosing a voice](#choosing-a-voice)
+- [Language](#language)
+- [Not on a Mac?](#not-on-a-mac)
+- [Turning it off and uninstalling](#turning-it-off-and-uninstalling)
+- [Troubleshooting](#troubleshooting)
+- [How it works](#how-it-works)
+- [Configuration files](#configuration-files)
+- [Pitfalls that became decisions](#pitfalls-that-became-decisions)
+- [Privacy](#privacy) · [Limitations](#limitations) · [Development](#development)
 
-```bash
-claude plugin marketplace add c-Morette/claude-voice-notify
-```
+## Quick start
 
-```bash
-claude plugin install voice-notify@voice-notify
-```
+1. Add this repository as a plugin marketplace and install the plugin. In a terminal:
 
-Or, inside a session: `/plugin marketplace add c-Morette/claude-voice-notify`, then `/plugin install voice-notify@voice-notify`.
+   ```bash
+   claude plugin marketplace add c-Morette/claude-voice-notify
+   ```
 
-Then open a new session (or run `/reload-plugins`) and turn it on:
+   ```bash
+   claude plugin install voice-notify@voice-notify
+   ```
 
-```
-/voice-notify on
-```
+   Inside a Claude Code session, the same thing is `/plugin marketplace add c-Morette/claude-voice-notify`, then `/plugin install voice-notify@voice-notify`.
 
-It is off until you do. Requirements: macOS, a Claude Code version with plugins, and `python3` 3.9 or newer (the one from the Xcode Command Line Tools is enough). Built on macOS 27 with Claude Code 2.1.287 (CLI) and 2.1.299 (desktop app).
+2. Open a **new** session. A session that was already open loads the new plugin only after `/reload-plugins`.
 
-## Usage
+3. Turn it on. The plugin is installed switched off, so nothing speaks until you do this:
+
+   ```
+   /voice-notify on
+   ```
+
+   You should hear *"Voice on."*
+
+4. Ask Claude for anything. When it finishes, you hear the repository name and, when there is something worth saying, a short summary.
+
+To hear a sample at any time, run `/voice-notify test`.
+
+## Requirements
+
+- **macOS.** Built and tested on macOS 27.
+- **Claude Code with plugin support**, in the terminal or in the desktop app. Tested with 2.1.287 (CLI) and 2.1.299 (desktop app).
+- **`python3`, version 3.9 or newer, on your `PATH`.** The `python3` from Apple's Command Line Tools is enough. If macOS asks you to install them the first time you run `python3`, accept, or run `xcode-select --install`.
+
+## What you will hear
+
+| When | English | Português |
+|---|---|---|
+| A session finished, with a summary | *"acme web is done. The tests pass. Approve the push when you can."* | *"Pronto, acme web acabou. Os testes passam. Falta você aprovar o envio."* |
+| A session finished, nothing to add | *"acme web is done."* | *"acme web terminou."* |
+| Claude needs permission for a tool | *"acme web is waiting for your approval."* | *"acme web está esperando sua aprovação."* |
+| Claude asked you a question | *"acme web has a question for you."* | *"acme web tem uma pergunta pra você."* |
+
+- **The opening sentence varies a little**, so it doesn't sound like a machine reading the same line.
+- **The name is the repository**, never the session title. A worktree is announced by its main repository.
+- **The summary is the last line of Claude's reply that starts with 🔊.** You will also see that line in the chat. Claude adds it only when there is something you need to know, so short replies often end without one.
+
+## Commands
 
 | Command | What it does |
 |---|---|
 | `/voice-notify on [voice]` | Turn on. Applies to every open session from its next message. |
 | `/voice-notify off` | Turn off. |
-| `/voice-notify test` | Speak a sample announcement. |
-| `/voice-notify voices` | List the installed voices for your language, best first. |
+| `/voice-notify test` | Speak a sample announcement with the current voice. |
+| `/voice-notify voices` | List the installed voices for your language, best first, and mark the one in use. |
 | `/voice-notify status` | On or off, language, voice, and the last five events. |
 | `/voice-notify lang en\|pt-BR\|auto` | Choose the language. `auto` follows the macOS language. |
-| `/voice-notify voice <id>\|auto` | Choose a voice from `voices`, or a `say` name like `Samantha`. |
+| `/voice-notify voice <id>\|auto` | Choose a voice by its identifier from `voices`, or a `say` name like `Samantha`. `auto` picks the best one. |
 
-The full name is `/voice-notify:voice-notify`. It is not `/voice` because Claude Code already has a built-in `/voice` (voice dictation), and the built-in wins.
+Without arguments, `/voice-notify` shows the status. The full name of the command is `/voice-notify:voice-notify`. It is not `/voice` because Claude Code already has a built-in `/voice` (voice dictation), and the built-in wins.
 
-**Get a good voice.** The default macOS voices sound robotic. The Siri voices sound human. Download one in System Settings > Accessibility > Spoken Content > System voice > Manage Voices, then run `/voice-notify voices`. With `voice` on `auto`, the plugin picks the best installed voice for the language by itself.
+## Choosing a voice
+
+Out of the box the plugin uses the best voice you have installed for your language. The voices that come with macOS sound robotic. The Siri voices sound human, so it is worth downloading one.
+
+**1. See what you have:**
+
+```
+/voice-notify voices
+```
+
+```
+voices for en (* = in use):
+* com.apple.voice.compact.en-US.Samantha  (Samantha, en-US, default)
+  com.apple.voice.super-compact.en-GB.Daniel  (Daniel, en-GB, default)
+  ...
+```
+
+The last column is the quality, from best to worst: `premium`, `enhanced`, `default`.
+
+**2. Download a better voice:**
+
+1. Open System Settings > Accessibility > Spoken Content.
+2. Open the System voice menu and choose Manage Voices.
+3. Pick your language. Download a Siri voice if one is offered, or one marked Premium or Enhanced.
+
+You don't have to make it the system voice. Run `/voice-notify voices` again and it shows up.
+
+**3. Use it:**
+
+- **Automatic:** leave the voice on `auto` (the default) and the plugin chooses for you. The order is Siri voices first, then premium, enhanced and default quality, then the main region (`en-US`, `pt-BR`). Novelty voices (Bells, Zarvox…), Eloquence voices (Eddy, Flo…) and your Personal Voice are never picked automatically.
+- **A specific voice:** copy its identifier from `voices`:
+
+  ```
+  /voice-notify voice com.apple.siri.natural.Sandra
+  ```
+
+  `/voice-notify on <identifier>` turns the plugin on and sets the voice in one step.
+- **A `say` voice name:** short names go through the `say` command (`say -v '?'` lists them):
+
+  ```
+  /voice-notify voice Samantha
+  ```
+
+  `say` can't reach the Siri voices. For those, use the identifier.
+- **Back to automatic:** `/voice-notify voice auto`.
+
+Try the result with `/voice-notify test`.
+
+**Can I use any other voice?** Any voice that macOS can speak with works: the built-in voices, the downloaded Siri, premium and enhanced voices, and any `say` voice. A voice from another language also works, but it reads the English or Portuguese text with its own accent. The plugin doesn't call outside services, so a cloud voice (ElevenLabs, OpenAI and similar) isn't supported in v0.1. Speaking rate and volume follow the macOS defaults.
+
+## Language
+
+The language decides three things: the instruction Claude gets, the sentences you hear, and the voices `auto` chooses from.
+
+- `auto` (default): the macOS interface language. Any Portuguese becomes `pt-BR`. Anything else becomes English.
+- `/voice-notify lang en` or `/voice-notify lang pt-BR`: fixed, whatever the system says.
+
+Claude writes the 🔊 summary in the language set here, even if you chat with it in another one.
+
+## Not on a Mac?
+
+v0.1 speaks through the macOS speech engine, so it works on **macOS only**.
+
+On Linux or Windows the plugin installs, but it stays silent on purpose:
+
+- The hooks exit at once.
+- Claude gets no extra instruction, so no extra tokens are spent.
+- `/voice-notify` only says that this system isn't supported.
+
+On Windows, the hooks call `python3`, a command that may not exist there. If Claude Code shows a hook error, disable the plugin in `/plugin`.
+
+Most of the script is portable: the hooks, the queue, the summary and the repository name. Only two pieces depend on the Mac: `speak()`, which uses AVSpeech, and the file lock, which uses `fcntl` on macOS and Linux. Support for other systems would mean a speaker for each one, such as `spd-say` or `espeak-ng` on Linux and `System.Speech` on Windows. Pull requests are welcome.
+
+## Turning it off and uninstalling
+
+- **Pause:** `/voice-notify off`. The plugin stays installed and adds nothing to your prompts.
+- **Uninstall:**
+
+  ```bash
+  claude plugin uninstall voice-notify@voice-notify
+  ```
+
+  ```bash
+  claude plugin marketplace remove voice-notify
+  ```
+
+  Then delete `~/.claude/voice-notify/` if you don't want to keep the settings and the log.
+
+## Troubleshooting
+
+- **Nothing speaks:**
+  1. Run `/voice-notify status`. It must say `ON`.
+  2. Did you open a new session after installing, or run `/reload-plugins`? A session that was already open doesn't have the hooks.
+  3. Look at `last events` in the status:
+     - **Events are listed:** the hooks work. Check the volume and the output device, then try `/voice-notify test`.
+     - **No events:** the hooks didn't run. Check that the plugin is enabled in `/plugin`, and look for it in `/hooks`.
+- **It never reads a summary.** Claude only writes the 🔊 line when there is something to tell you. If it never does, check that the plugin was on before you sent the message: the instruction goes with each prompt.
+- **It says the wrong project.** The name comes from the folder where the session started, not from where Claude moved later with `cd`. Inside a git repository, it is the repository's folder name.
+- **I hear two voices.** Another hook, yours or another plugin's, also speaks. Keep one of them.
+- **The voice sounds robotic.** Install a Siri or premium voice. See [Choosing a voice](#choosing-a-voice).
+- **`claude -p` and SDK scripts don't speak.** That is on purpose: nobody is listening to them.
 
 ## How it works
 
@@ -68,7 +210,7 @@ Hooks never speak by themselves. They append to a queue and start a detached spe
 
 Two cases are skipped on purpose. `stop_hook_active` means Claude is continuing because of a Stop hook, so the session hasn't really finished. `CLAUDE_CODE_ENTRYPOINT=sdk*` means `claude -p` and SDK scripts, which nobody is listening to.
 
-## Configuration
+## Configuration files
 
 State lives in `~/.claude/voice-notify/`:
 
@@ -141,9 +283,11 @@ The `narrator` plugin in [midudev/better-claude](https://github.com/midudev/bett
 
 ## Português
 
-**claude-voice-notify** é um plugin para o Claude Code no macOS que **fala** quando uma sessão termina ou precisa de você. Ele diz o nome do repositório e lê um resumo de 2 a 4 frases. Quem escreve esse resumo é o próprio Claude, no fim da resposta. Tudo fica no seu Mac: sem rede, sem chave de API e sem outro modelo. É um projeto não oficial, sem vínculo com a Anthropic.
+**claude-voice-notify** é um plugin para o Claude Code que **fala** quando uma sessão termina ou precisa de você. Ele diz o nome do repositório e lê um resumo de 2 a 4 frases. Quem escreve esse resumo é o próprio Claude, no fim da resposta. Tudo fica no seu Mac: sem rede, sem chave de API e sem outro modelo. É um projeto não oficial, sem vínculo com a Anthropic.
 
-**Instalação:**
+**Só macOS na v0.1.** No Linux e no Windows ele instala, mas fica calado (veja [Not on a Mac?](#not-on-a-mac)).
+
+**Instalação**, no terminal:
 
 ```bash
 claude plugin marketplace add c-Morette/claude-voice-notify
@@ -153,17 +297,26 @@ claude plugin marketplace add c-Morette/claude-voice-notify
 claude plugin install voice-notify@voice-notify
 ```
 
-Depois, numa sessão nova, rode `/voice-notify on`. Os comandos são:
+Depois, abra uma sessão **nova** e rode `/voice-notify on`. Você ouve *"Voz ligada."* Ele vem desligado, por isso esse passo é obrigatório.
 
-- `on`, `off` e `test`.
-- `voices`: lista as vozes instaladas.
-- `status`.
-- `lang en|pt-BR|auto`.
-- `voice <id>|auto`.
+**Comandos:**
+
+- `/voice-notify on` e `/voice-notify off`.
+- `/voice-notify test`: fala um aviso de exemplo.
+- `/voice-notify voices`: lista as vozes instaladas do idioma, da melhor para a pior.
+- `/voice-notify voice <identificador>`: escolhe uma voz. `voice auto` volta para a automática.
+- `/voice-notify lang pt-BR|en|auto`: escolhe o idioma.
+- `/voice-notify status`: mostra se está ligado, o idioma, a voz e os últimos avisos.
 
 O nome não é `/voice` porque o Claude Code já tem um `/voice` próprio, de ditado.
 
-**Voz boa:** as vozes da Siri são bem mais naturais que as padrão. Baixe uma em Ajustes do Sistema > Acessibilidade > Conteúdo Falado > Voz do sistema > Gerenciar Vozes. Com `voice auto`, o plugin escolhe sozinho a melhor voz instalada para o idioma.
+**Voz boa:**
+
+1. Abra Ajustes do Sistema > Acessibilidade > Conteúdo Falado.
+2. No menu Voz do sistema, escolha Gerenciar Vozes.
+3. Baixe uma voz da Siri, ou uma marcada como Premium ou Melhorada.
+
+Não precisa colocá-la como voz do sistema. Com `voice auto`, o plugin escolhe sozinho a melhor voz instalada, e a Siri vem primeiro. Para fixar uma voz, copie o identificador do `voices`, por exemplo `/voice-notify voice com.apple.siri.natural.Sandra`.
 
 **Como funciona:**
 
@@ -171,7 +324,7 @@ O nome não é `/voice` porque o Claude Code já tem um `/voice` próprio, de di
 - `Stop`: põe na fila "*repo* terminou" e o resumo.
 - `Notification`: avisa quando há aprovação ou pergunta esperando você.
 
-Um falador solto lê a fila em ordem, um aviso por vez. As armadilhas, a configuração e as limitações estão nas seções em inglês acima. O estado fica em `~/.claude/voice-notify/`.
+Um falador solto lê a fila em ordem, um aviso por vez. Problemas, configuração, armadilhas e limitações estão nas seções em inglês acima. O estado fica em `~/.claude/voice-notify/`.
 
 ## License
 

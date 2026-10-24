@@ -1,6 +1,6 @@
 {
   "name": "voice-notify",
-  "description": "Spoken notifications for Claude Code on macOS: the repository name plus a short summary written by Claude itself.",
+  "description": "Spoken notifications for Claude Code on macOS, Linux and Windows: the repository name plus a short summary written by Claude itself.",
   "owner": {
     "name": "c-Morette",
     "url": "https://github.com/c-Morette"
@@ -9,7 +9,7 @@
     {
       "name": "voice-notify",
       "source": ".",
-      "description": "Spoken notifications on macOS when a Claude Code session finishes or needs you."
+      "description": "Spoken notifications when a Claude Code session finishes or needs you."
     }
   ]
 }

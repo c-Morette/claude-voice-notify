@@ -1,12 +1,5 @@
-bin/
-obj/
-node_modules/
-dist/
-build/
-.vs/
-.idea/
+__pycache__/
+*.pyc
 .DS_Store
 .env
-*.local.env
-appsettings.Development.json
 .claude/settings.local.json

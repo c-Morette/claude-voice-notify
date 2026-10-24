@@ -268,7 +268,9 @@ def speak(text, voice, lang, command=""):
         run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SAPI_PS], timeout=180,
             env=speech_env(text, voice, lang))
     elif engine == "spd-say":   # -w waits until the sentence is spoken
-        run(["spd-say", "-w", "-l", lang] + (["-y", voice] if voice else []) + [text], timeout=180)
+        r = run(["spd-say", "-w", "-l", lang] + (["-y", voice] if voice else []) + [text], timeout=90)
+        if r.returncode and shutil.which("espeak-ng"):   # no speech-dispatcher daemon or audio: try eSpeak NG
+            run(["espeak-ng", "-v", ESPEAK_VOICE[lang], text], timeout=180)
     elif engine == "espeak-ng":
         run(["espeak-ng", "-v", voice or ESPEAK_VOICE[lang], text], timeout=180)
 

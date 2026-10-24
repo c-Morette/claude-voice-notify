@@ -309,6 +309,9 @@ class EngineTest(StateTestCase):
         self.assertEqual(self.speak("linux", "spd-say", "")[0][0], ["spd-say", "-w", "-l", "pt-BR", "hello there"])
         self.assertEqual(self.speak("linux", "spd-say", "female1")[0][0][-3:], ["-y", "female1", "hello there"])
         self.assertEqual(self.speak("linux", "espeak-ng", "")[0][0], ["espeak-ng", "-v", "pt-br", "hello there"])
+        with mock.patch.object(self.vn.shutil, "which", return_value="/usr/bin/espeak-ng"):
+            calls = self.speak("linux", "spd-say", "female1", rc=1)
+        self.assertEqual(calls[-1][0], ["espeak-ng", "-v", "pt-br", "hello there"])
 
     def test_windows_passes_text_in_the_environment(self):
         cmd, kw = self.speak("windows", "sapi", "Microsoft Maria Desktop")[0]

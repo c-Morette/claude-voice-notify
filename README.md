@@ -14,7 +14,7 @@ When a session finishes, your computer says the repository name and reads a shor
 | System | Status |
 |---|---|
 | macOS | Used every day. Siri voices supported. |
-| Linux | New in 0.2. Covered by the unit tests, not yet tried on a real desktop. |
+| Linux | New in 0.2. Tested in a Debian container with eSpeak NG (hooks, queue, voices), without a sound card. Not yet tried on a real desktop. |
 | Windows | New in 0.2. Covered by the unit tests, not yet tried on a real machine. |
 
 **Unofficial.** This is a community plugin, not affiliated with or endorsed by Anthropic.
@@ -169,7 +169,7 @@ To add a language, go to Settings > Time & language > Speech > Manage voices > A
 
 The plugin uses `spd-say` (speech-dispatcher) if it's installed, otherwise `espeak-ng`. The engine picks a voice for the language by itself. `/voice-notify voices` shows the engine's own list:
 
-- **With `spd-say`:** the voice is passed as `-y <name>`.
+- **With `spd-say`:** the voice is passed as `-y <name>`. If `spd-say` fails, for example because the speech-dispatcher service isn't running, `espeak-ng` reads the announcement when it's installed.
 - **With `espeak-ng`:** the voice is passed as `-v <name>`, for example `pt-br` or `en-gb`.
 
 ```
@@ -353,7 +353,7 @@ The `narrator` plugin in [midudev/better-claude](https://github.com/midudev/bett
 
 **claude-voice-notify** é um plugin para o Claude Code que **fala** quando uma sessão termina ou precisa de você. Ele diz o nome do repositório e lê um resumo de 2 a 4 frases. Quem escreve esse resumo é o próprio Claude, no fim da resposta. Usa a voz do próprio sistema: sem rede, sem chave de API e sem outro modelo. É um projeto não oficial, sem vínculo com a Anthropic.
 
-**Sistemas:** macOS (uso diário, com as vozes da Siri), Linux e Windows (novos na 0.2, ainda não testados em máquina de verdade).
+**Sistemas:** macOS (uso diário, com as vozes da Siri), Linux (novo na 0.2, testado num container Debian com eSpeak NG) e Windows (novo na 0.2, ainda não testado em máquina de verdade).
 
 **Instalação**, no terminal:
 

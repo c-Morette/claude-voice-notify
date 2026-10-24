@@ -7,7 +7,7 @@ One file, standard library only, Python 3.9+. Claude Code runs it as a hook:
   Stop              (async)  queues "<repo> is done." plus that summary
   Notification      (async)  queues "<repo> needs you." when a permission prompt or question waits
 
-and the /voice command runs it with on, off, test, voices, status, lang or voice.
+and the /voice-notify command runs it with on, off, test, voices, status, lang or voice.
 Everything stays on this machine: no network, no API calls, no extra model.
 """
 import datetime
@@ -140,18 +140,21 @@ def installed_voices():
     return voices
 
 
+ODD_VOICES = re.compile(r"speech\.synthesis\.voice|eloquence|personalvoice")   # novelty, Eloquence, Personal Voice
+
+
 def voice_rank(voice, lang):
     """Higher is better: Siri voices, then premium > enhanced > default, then the main region, then not compact."""
     ident, _, vlang, quality = voice
     main_region = {"en": "en-us", "pt-BR": "pt-br"}[lang]
-    return (".siri." in ident, quality, vlang.lower() == main_region, "compact" not in ident)
+    return (".siri." in ident, quality, vlang.lower() == main_region, not ODD_VOICES.search(ident),
+            "compact" not in ident)
 
 
 def best_voice(lang, voices):
     """The best installed voice for the language, or None. Novelty, Eloquence and Personal Voice are left out."""
     tag = lang.lower()
-    usable = [v for v in voices if v[2].lower().startswith(tag)
-              and not re.search(r"speech\.synthesis\.voice|eloquence|personalvoice", v[0])]
+    usable = [v for v in voices if v[2].lower().startswith(tag) and not ODD_VOICES.search(v[0])]
     return max(usable, key=lambda v: voice_rank(v, lang)) if usable else None
 
 
@@ -333,7 +336,7 @@ def hook(stdin_text):
     return ""
 
 
-# --- /voice --------------------------------------------------------------------------------------------------
+# --- /voice-notify -------------------------------------------------------------------------------------------
 
 def status():
     config = load_config()
@@ -358,14 +361,14 @@ def list_voices():
     return "\n".join([f"voices for {lang} (* = in use):"] + (rows or ["  none installed"]) + [
         "",
         "More voices: System Settings > Accessibility > Spoken Content > System voice > Manage Voices.",
-        "Pick one with: /voice voice <identifier>   (or /voice voice auto)"])
+        "Pick one with: /voice-notify voice <identifier>   (or /voice-notify voice auto)"])
 
 
-USAGE = """usage: /voice [on [voice] | off | test | voices | status | lang <en|pt-BR|auto> | voice <identifier|auto>]"""
+USAGE = """usage: /voice-notify [on [voice] | off | test | voices | status | lang <en|pt-BR|auto> | voice <identifier|auto>]"""
 
 
 def command(args):
-    """The /voice command. Returns the text the command shows."""
+    """The /voice-notify command. Returns the text the command shows."""
     if not is_mac():
         return ("claude-voice-notify speaks through the macOS speech engine, so v0.1 works on macOS only. "
                 "On this system the hooks do nothing.")
@@ -385,7 +388,7 @@ def command(args):
         lang = language()
         enqueue(f"{random.choice(PHRASES[lang]['done_summary']).format(p=spoken_name(session_folder({})))} "
                 f"{PHRASES[lang]['test']}", lang)
-        return "Speaking a test announcement" + ("." if ENABLED.exists() else " (notifications are off: /voice on).")
+        return "Speaking a test announcement" + ("." if ENABLED.exists() else " (notifications are off: /voice-notify on).")
     if action == "voices":
         return list_voices()
     if action == "lang" and rest and (rest[0] in LANGUAGES or rest[0] == "auto"):

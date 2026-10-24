@@ -1,0 +1,14 @@
+{
+  "name": "voice-notify",
+  "displayName": "Voice Notify",
+  "version": "0.1.0",
+  "description": "Spoken notifications on macOS when a Claude Code session finishes or needs you: the repository name plus a short summary written by Claude itself.",
+  "author": {
+    "name": "c-Morette",
+    "url": "https://github.com/c-Morette"
+  },
+  "homepage": "https://github.com/c-Morette/claude-voice-notify",
+  "repository": "https://github.com/c-Morette/claude-voice-notify",
+  "license": "MIT",
+  "keywords": ["voice", "tts", "speech", "notifications", "macos", "hooks"]
+}

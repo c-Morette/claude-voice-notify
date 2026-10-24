@@ -4,6 +4,7 @@ import io
 import json
 import os
 import random
+import shlex
 import shutil
 import subprocess
 import sys
@@ -142,13 +143,13 @@ class QueueTest(StateTestCase):
             self.vn.speak_queue(lambda *a: spoken.append(a))
             self.assertEqual(spoken, [])
         finally:
-            held.close()
+            held.release()
         self.assertEqual(self.vn.dequeue()["text"], "one")
 
 
 class HookTest(StateTestCase):
     def run_hook(self, payload, mac=True):
-        with mock.patch.object(self.vn, "is_mac", return_value=mac), \
+        with mock.patch.object(self.vn, "system_engine", return_value="avspeech" if mac else ""), \
                 mock.patch.object(self.vn, "enqueue") as enqueue, \
                 mock.patch.object(self.vn, "system_language", return_value="en-US"):
             out = self.vn.hook(json.dumps(payload))
@@ -177,10 +178,24 @@ class HookTest(StateTestCase):
         out, enqueue = self.run_hook({"hook_event_name": "Stop", "cwd": self.home})
         enqueue.assert_not_called()
 
-    def test_not_macos_does_nothing(self):
+    def test_no_engine_means_no_instruction(self):
         self.turn_on()
         out, enqueue = self.run_hook({"hook_event_name": "UserPromptSubmit"}, mac=False)
         self.assertEqual(out, "")
+        out, enqueue = self.run_hook({"hook_event_name": "Stop", "cwd": self.home}, mac=False)
+        enqueue.assert_not_called()
+
+    def test_own_program_is_enough_to_speak(self):
+        self.turn_on()
+        self.vn.save_config(command="my-tts")
+        out, _ = self.run_hook({"hook_event_name": "UserPromptSubmit"}, mac=False)
+        self.assertIn("additionalContext", out)
+
+    def test_output_is_ascii_json(self):
+        self.turn_on()
+        out, _ = self.run_hook({"hook_event_name": "UserPromptSubmit"})
+        out.encode("ascii")
+        self.assertIn("🔊", json.loads(out)["hookSpecificOutput"]["additionalContext"])
 
     def test_stop_hook_active_and_sdk_are_skipped(self):
         self.turn_on()
@@ -206,15 +221,15 @@ class HookTest(StateTestCase):
 
     def test_bad_input_never_raises(self):
         self.turn_on()
-        with mock.patch.object(self.vn, "is_mac", return_value=True):
+        with mock.patch.object(self.vn, "system_engine", return_value="avspeech"):
             self.assertEqual(self.vn.hook("{not json"), "")
 
     def test_main_prints_only_for_user_prompt_submit(self):
         self.turn_on()
         buf = io.StringIO()
-        with mock.patch.object(self.vn, "is_mac", return_value=True), \
+        with mock.patch.object(self.vn, "system_engine", return_value="avspeech"), \
                 mock.patch.object(self.vn, "system_language", return_value="en"), \
-                mock.patch.object(sys, "stdin", io.StringIO('{"hook_event_name": "UserPromptSubmit"}')), \
+                mock.patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO('{"hook_event_name": "UserPromptSubmit"}'.encode()))), \
                 redirect_stdout(buf):
             self.vn.main(["hook"])
         self.assertIn("additionalContext", json.loads(buf.getvalue())["hookSpecificOutput"])
@@ -230,10 +245,10 @@ class LanguageAndVoiceTest(StateTestCase):
 
     def test_apple_languages_parsing(self):
         out = subprocess.CompletedProcess([], 0, '(\n    "pt-BR",\n    "en-US"\n)\n', "")
-        with mock.patch.object(self.vn, "is_mac", return_value=True), mock.patch.object(self.vn, "run", return_value=out):
+        with mock.patch.object(self.vn, "system", return_value="mac"), mock.patch.object(self.vn, "run", return_value=out):
             self.assertEqual(self.vn.system_language(), "pt-BR")
         out = subprocess.CompletedProcess([], 0, "(\n    en,\n    fr\n)\n", "")
-        with mock.patch.object(self.vn, "is_mac", return_value=True), mock.patch.object(self.vn, "run", return_value=out):
+        with mock.patch.object(self.vn, "system", return_value="mac"), mock.patch.object(self.vn, "run", return_value=out):
             self.assertEqual(self.vn.system_language(), "en")
 
     def test_best_voice(self):
@@ -255,6 +270,87 @@ class LanguageAndVoiceTest(StateTestCase):
         with mock.patch.object(self.vn, "installed_voices") as voices:
             self.assertEqual(self.vn.chosen_voice("en", {"voice": "Samantha"}), "Samantha")
             voices.assert_not_called()
+
+
+class EngineTest(StateTestCase):
+    def speak(self, platform, engine, voice="", command="", rc=0):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(cmd, rc, "", "")
+        with mock.patch.object(self.vn, "system", return_value=platform), \
+                mock.patch.object(self.vn, "system_engine", return_value=engine), \
+                mock.patch.object(self.vn, "run", side_effect=fake_run):
+            self.vn.speak("hello there", voice, "pt-BR", command)
+        return calls
+
+    def test_engine_per_system(self):
+        with mock.patch.object(self.vn, "system", return_value="mac"):
+            self.assertEqual(self.vn.system_engine(), "avspeech")
+        with mock.patch.object(self.vn, "system", return_value="linux"), \
+                mock.patch.object(self.vn.shutil, "which", side_effect=lambda e: e == "espeak-ng" and "/usr/bin/x"):
+            self.assertEqual(self.vn.system_engine(), "espeak-ng")
+        with mock.patch.object(self.vn, "system", return_value="windows"), \
+                mock.patch.object(self.vn.shutil, "which", return_value=None):
+            self.assertEqual(self.vn.system_engine(), "")
+            self.assertFalse(self.vn.can_speak({}))
+            self.assertTrue(self.vn.can_speak({"command": "my-tts"}))
+
+    def test_mac(self):
+        cmd = self.speak("mac", "avspeech", "com.apple.siri.natural.Sandra")[0][0]
+        self.assertEqual(cmd[:2], ["osascript", "-l"])
+        self.assertEqual(cmd[-3:], ["com.apple.siri.natural.Sandra", "pt-BR", "hello there"])
+        self.assertEqual(self.speak("mac", "avspeech", "Luciana")[0][0], ["say", "-v", "Luciana", "hello there"])
+        calls = self.speak("mac", "avspeech", "com.apple.x", rc=1)
+        self.assertEqual(calls[-1][0], ["say", "hello there"])
+
+    def test_linux(self):
+        self.assertEqual(self.speak("linux", "spd-say", "")[0][0], ["spd-say", "-w", "-l", "pt-BR", "hello there"])
+        self.assertEqual(self.speak("linux", "spd-say", "female1")[0][0][-3:], ["-y", "female1", "hello there"])
+        self.assertEqual(self.speak("linux", "espeak-ng", "")[0][0], ["espeak-ng", "-v", "pt-br", "hello there"])
+
+    def test_windows_passes_text_in_the_environment(self):
+        cmd, kw = self.speak("windows", "sapi", "Microsoft Maria Desktop")[0]
+        self.assertEqual(cmd[0], "powershell")
+        self.assertNotIn("hello there", " ".join(cmd))
+        self.assertEqual(kw["env"]["VOICE_NOTIFY_TEXT"], "hello there")
+        self.assertEqual(kw["env"]["VOICE_NOTIFY_VOICE"], "Microsoft Maria Desktop")
+
+    def test_windows_language(self):
+        with mock.patch.object(self.vn, "system", return_value="windows"), \
+                mock.patch.object(self.vn, "windows_ui_language", return_value="pt_BR"):
+            self.assertEqual(self.vn.language({}), "pt-BR")
+
+    def test_own_program_first_then_fallback(self):
+        with mock.patch.object(self.vn, "run_command", return_value=True) as own:
+            self.assertEqual(self.speak("linux", "espeak-ng", command="my-tts"), [])
+        own.assert_called_once()
+        with mock.patch.object(self.vn, "run_command", return_value=False):
+            self.assertEqual(self.speak("linux", "espeak-ng", command="my-tts")[0][0][0], "espeak-ng")
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell")
+    def test_own_program_gets_the_text_safely(self):
+        out = Path(self.home) / "said.txt"
+        text = 'it\'s "done"; $(touch pwned) `x`'
+        with mock.patch.object(self.vn, "system", return_value="linux"):
+            ok = self.vn.run_command(f"printf '%s|%s' \"$VOICE_NOTIFY_LANG\" > {shlex.quote(str(out))}", text, "", "en")
+        self.assertTrue(ok)
+        self.assertEqual(out.read_text(), "en|" + text)
+        self.assertFalse((Path(self.home) / "pwned").exists())
+        with mock.patch.object(self.vn, "system", return_value="linux"):
+            self.assertFalse(self.vn.run_command("exit 3", "x", "", "en"))
+
+
+@unittest.skipIf(os.name == "nt", "POSIX shell")
+class LauncherTest(StateTestCase):
+    def test_run_sh_finds_python(self):
+        env = dict(os.environ, CLAUDE_VOICE_NOTIFY_HOME=self.home)
+        r = subprocess.run(["sh", str(ROOT / "scripts" / "run.sh"), "status"], env=env, capture_output=True, text=True)
+        self.assertIn("voice notifications: off", r.stdout)
+        r = subprocess.run(["sh", str(ROOT / "scripts" / "run.sh"), "hook"], input='{"hook_event_name": "Stop"}',
+                           env=env, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
 
 
 @unittest.skipUnless(shutil.which("git"), "needs git")
@@ -281,13 +377,31 @@ class SpokenNameTest(StateTestCase):
 
 
 class CommandTest(StateTestCase):
-    def test_not_macos_explains(self):
-        with mock.patch.object(self.vn, "is_mac", return_value=False):
-            self.assertIn("macOS only", self.vn.command(["on"]))
-        self.assertFalse(self.vn.ENABLED.exists())
+    def test_no_engine_explains_and_stays_quiet(self):
+        with mock.patch.object(self.vn, "system", return_value="linux"), \
+                mock.patch.object(self.vn.shutil, "which", return_value=None), \
+                mock.patch.object(self.vn, "enqueue") as enqueue:
+            self.assertIn("No speech engine found", self.vn.command(["on"]))
+            self.assertIn("No speech engine found", self.vn.command(["test"]))
+        enqueue.assert_not_called()
+
+    def test_command_and_voice_with_spaces(self):
+        with mock.patch.object(self.vn, "system", return_value="linux"), \
+                mock.patch.object(self.vn, "system_engine", return_value="espeak-ng"):
+            self.vn.command(["command", "say", "-r", "230"])
+            self.assertEqual(self.vn.load_config()["command"], "say -r 230")
+            self.vn.command(["command", "my tts", "--voice", "Ana Paula"])
+            self.assertEqual(self.vn.load_config()["command"], "'my tts' --voice 'Ana Paula'")
+            self.assertIn("your program", self.vn.command(["status"]))
+            self.vn.command(["command", "off"])
+            self.assertEqual(self.vn.load_config()["command"], "")
+            self.vn.command(["voice", "Microsoft", "Maria", "Desktop"])
+            self.assertEqual(self.vn.load_config()["voice"], "Microsoft Maria Desktop")
+        with mock.patch.object(self.vn, "system", return_value="windows"):
+            self.assertEqual(self.vn.join_args(["C:/tools/my tts.exe", "-v", "x"]), '"C:/tools/my tts.exe" -v x')
 
     def test_on_off_lang_voice(self):
-        with mock.patch.object(self.vn, "is_mac", return_value=True), \
+        with mock.patch.object(self.vn, "system_engine", return_value="avspeech"), \
                 mock.patch.object(self.vn, "enqueue") as enqueue, \
                 mock.patch.object(self.vn, "installed_voices", return_value=[]), \
                 mock.patch.object(self.vn, "system_language", return_value="en"):

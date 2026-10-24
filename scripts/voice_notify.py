@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-voice-notify: spoken notifications for Claude Code on macOS.
+"""claude-voice-notify: spoken notifications for Claude Code.
 
 One file, standard library only, Python 3.9+. Claude Code runs it as a hook:
 
@@ -7,21 +7,26 @@ One file, standard library only, Python 3.9+. Claude Code runs it as a hook:
   Stop              (async)  queues "<repo> is done." plus that summary
   Notification      (async)  queues "<repo> needs you." when a permission prompt or question waits
 
-and the /voice-notify command runs it with on, off, test, voices, status, lang or voice.
-Everything stays on this machine: no network, no API calls, no extra model.
+and the /voice-notify command runs it with on, off, test, voices, status, lang, voice or command.
+
+It speaks with the system's own engine: AVSpeech on macOS (reaches the Siri voices), speech-dispatcher or
+eSpeak NG on Linux, System.Speech on Windows. Or with a program you choose (/voice-notify command).
+Nothing leaves this machine unless that program sends it somewhere.
 """
 import datetime
 import json
 import os
 import random
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 STATE = Path(os.environ.get("CLAUDE_VOICE_NOTIFY_HOME") or Path.home() / ".claude" / "voice-notify")
 ENABLED = STATE / "enabled"      # exists = speak
-CONFIG = STATE / "config.json"   # {"language": "auto" | "en" | "pt-BR", "voice": "" (auto) | identifier | say name}
+CONFIG = STATE / "config.json"   # {"language": "auto" | "en" | "pt-BR", "voice": "" (auto) | name, "command": ""}
 QUEUE = STATE / "queue.jsonl"    # announcements waiting their turn, one JSON per line
 LOG = STATE / "voice.log"        # last 50 hook events, including the silent ones
 LOG_LINES = 50
@@ -62,7 +67,7 @@ PHRASES = {
     },
 }
 
-# AVSpeech through JavaScript for Automation reaches the Siri and premium voices; `say` does not.
+# macOS: AVSpeech through JavaScript for Automation reaches the Siri and premium voices; `say` does not.
 SPEAK_JS = """ObjC.import("AVFoundation");
 function run(argv) {
   const s = $.AVSpeechSynthesizer.alloc.init, u = $.AVSpeechUtterance.speechUtteranceWithString(argv[2]);
@@ -79,15 +84,36 @@ for (let i = 0; i < v.count; i++) { const x = v.objectAtIndex(i);
 r.join("\\n")"""
 QUALITY = {1: "default", 2: "enhanced", 3: "premium"}
 
+# Windows: System.Speech ships with Windows PowerShell 5.1 (powershell.exe; PowerShell 7 doesn't have it).
+# The text and the voice travel in environment variables, so nothing is ever quoted into a command line.
+SAPI_PS = """Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { $_.VoiceInfo }
+$p = if ($env:VOICE_NOTIFY_VOICE) { $v | Where-Object { $_.Name -eq $env:VOICE_NOTIFY_VOICE } }
+     else { $v | Where-Object { $_.Culture.Name -like "$($env:VOICE_NOTIFY_LANG)*" } }
+if ($p) { $s.SelectVoice(@($p)[0].Name) }
+$s.Speak($env:VOICE_NOTIFY_TEXT)"""
+SAPI_VOICES_PS = """Add-Type -AssemblyName System.Speech
+(New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() | Where-Object { $_.Enabled } |
+  ForEach-Object { $_.VoiceInfo.Name + "`t" + $_.VoiceInfo.Name + "`t" + $_.VoiceInfo.Culture.Name + "`t1" }"""
 
-def is_mac():
-    return sys.platform == "darwin"
+ESPEAK_VOICE = {"en": "en-us", "pt-BR": "pt-br"}
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # Windows: no console window flashing up
 
 
-def run(cmd, cwd=None, timeout=10):
+def system():
+    """"mac", "linux", "windows" or another sys.platform value."""
+    if sys.platform == "darwin":
+        return "mac"
+    if os.name == "nt":
+        return "windows"
+    return "linux" if sys.platform.startswith("linux") else sys.platform
+
+
+def run(cmd, cwd=None, timeout=10, env=None):
     try:
         return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout)
+                              timeout=timeout, env=env, creationflags=NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired) as e:
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
 
@@ -109,12 +135,26 @@ def save_config(**changes):
     CONFIG.write_text(json.dumps(c, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def windows_ui_language():
+    import ctypes
+    import locale
+    return locale.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage(), "")
+
+
 def system_language():
-    """The macOS interface language (AppleLanguages), then the POSIX locale. Empty if neither says."""
-    if is_mac():
-        m = re.search(r'\(\s*"?([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)*)', run(["defaults", "read", "-g", "AppleLanguages"]).stdout)
-        if m:
-            return m.group(1)
+    """The interface language (macOS AppleLanguages, Windows UI language), then the POSIX locale. "" if unknown."""
+    try:
+        if system() == "mac":
+            m = re.search(r'\(\s*"?([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)*)',
+                          run(["defaults", "read", "-g", "AppleLanguages"]).stdout)
+            if m:
+                return m.group(1)
+        elif system() == "windows":
+            tag = windows_ui_language()
+            if tag:
+                return tag
+    except Exception:
+        pass
     for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
         if os.environ.get(var, "") not in ("", "C", "POSIX"):
             return os.environ[var]
@@ -128,13 +168,37 @@ def language(config=None):
     return "pt-BR" if system_language().lower().startswith("pt") else "en"
 
 
-# --- voices --------------------------------------------------------------------------------------------------
+# --- speech engines ------------------------------------------------------------------------------------------
+
+def system_engine():
+    """The system's own speech engine: "avspeech", "sapi", "spd-say", "espeak-ng", or "" if there is none."""
+    s = system()
+    if s == "mac":
+        return "avspeech"
+    if s == "windows":
+        return "sapi" if shutil.which("powershell") else ""
+    if s == "linux":
+        return next((e for e in ("spd-say", "espeak-ng") if shutil.which(e)), "")
+    return ""
+
+
+def can_speak(config=None):
+    return bool((config if config is not None else load_config()).get("command")) or bool(system_engine())
+
 
 def installed_voices():
-    """[(identifier, name, language, quality)] from AVSpeech. Empty off macOS or if osascript fails."""
+    """[(identifier, name, language, quality)] on macOS (AVSpeech) and Windows (System.Speech). [] elsewhere:
+    on Linux the engine picks a voice for the language."""
+    engine = system_engine()
+    if engine == "avspeech":
+        out = run(["osascript", "-l", "JavaScript", "-e", VOICES_JS]).stdout
+    elif engine == "sapi":
+        out = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SAPI_VOICES_PS], timeout=30).stdout
+    else:
+        return []
     voices = []
-    for line in run(["osascript", "-l", "JavaScript", "-e", VOICES_JS]).stdout.splitlines():
-        f = line.split("\t")
+    for line in out.splitlines():
+        f = line.strip("\r").split("\t")
         if len(f) == 4:
             voices.append((f[0], f[1], f[2], int(f[3]) if f[3].isdigit() else 1))
     return voices
@@ -159,7 +223,7 @@ def best_voice(lang, voices):
 
 
 def chosen_voice(lang, config=None):
-    """The configured voice, or the best installed one for the language ("" lets macOS pick)."""
+    """The configured voice, or the best installed one for the language ("" lets the engine pick)."""
     v = (config if config is not None else load_config()).get("voice") or ""
     if v:
         return v
@@ -167,31 +231,105 @@ def chosen_voice(lang, config=None):
     return best[0] if best else ""
 
 
-def speak(text, voice, lang):
-    """A dotted identifier goes through AVSpeech (reaches Siri), a short name through `say -v`. Blocks until done."""
-    if voice and "." not in voice:
-        r = run(["say", "-v", voice, text], timeout=180)
-    else:
-        r = run(["osascript", "-l", "JavaScript", "-e", SPEAK_JS, voice or "", lang, text], timeout=180)
-    if r.returncode:
-        run(["say", text], timeout=180)
+def speech_env(text, voice, lang):
+    return dict(os.environ, VOICE_NOTIFY_TEXT=text, VOICE_NOTIFY_LANG=lang, VOICE_NOTIFY_VOICE=voice or "")
+
+
+def run_command(command, text, voice, lang):
+    """Your own speech program. It runs in the system shell with the text in VOICE_NOTIFY_TEXT (plus _LANG and
+    _VOICE); on macOS and Linux the text is also its last argument. True if it exited with 0."""
+    env = speech_env(text, voice, lang)
+    try:
+        if system() == "windows":
+            r = subprocess.run(command, shell=True, env=env, timeout=300, creationflags=NO_WINDOW,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            r = subprocess.run(["/bin/sh", "-c", command + ' "$VOICE_NOTIFY_TEXT"'], env=env, timeout=300,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def speak(text, voice, lang, command=""):
+    """Says the text and returns when it's done. Your program goes first; if it fails, the system voice speaks."""
+    if command and run_command(command, text, voice, lang):
+        return
+    engine = system_engine()
+    if engine == "avspeech":
+        # A dotted identifier goes through AVSpeech (reaches Siri), a short name through `say -v`.
+        if voice and "." not in voice:
+            r = run(["say", "-v", voice, text], timeout=180)
+        else:
+            r = run(["osascript", "-l", "JavaScript", "-e", SPEAK_JS, voice or "", lang, text], timeout=180)
+        if r.returncode:
+            run(["say", text], timeout=180)
+    elif engine == "sapi":
+        run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SAPI_PS], timeout=180,
+            env=speech_env(text, voice, lang))
+    elif engine == "spd-say":   # -w waits until the sentence is spoken
+        run(["spd-say", "-w", "-l", lang] + (["-y", voice] if voice else []) + [text], timeout=180)
+    elif engine == "espeak-ng":
+        run(["espeak-ng", "-v", voice or ESPEAK_VOICE[lang], text], timeout=180)
 
 
 # --- queue ---------------------------------------------------------------------------------------------------
-# An async hook still has a timeout, and a long summary or two sessions finishing together can outlast it.
+# A hook runs inside Claude Code's hook lifecycle, and two hooks speaking at once talk over each other.
 # So the hook only appends to a queue and starts a detached speaker; one speaker at a time reads it in order.
 
+class FileLock:
+    """An exclusive lock on a file in STATE: flock on macOS and Linux, msvcrt on Windows."""
+
+    def __init__(self, f):
+        self.f = f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    def release(self):
+        if os.name == "nt":
+            import msvcrt
+            try:
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        self.f.close()   # closing also releases a flock
+
+
 def lock(name, wait=True):
-    """flock on a file in STATE. Returns the open file (closing it releases) or None if busy and wait=False."""
-    import fcntl   # macOS/Linux only; callers checked is_mac()
+    """Returns a FileLock, or None if the lock is busy and wait=False."""
     STATE.mkdir(parents=True, exist_ok=True)
-    f = open(STATE / name, "w")
+    f = open(STATE / name, "a+")
     try:
-        fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        return f
+        if os.name == "nt":
+            import msvcrt   # LK_LOCK retries for about 10 s, then raises
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        return FileLock(f)
     except OSError:
         f.close()
         return None
+
+
+def start_speaker():
+    """A speaker process that outlives the hook: its own session on macOS and Linux, detached on Windows."""
+    argv = [sys.executable, os.path.abspath(__file__), "--speak-queue"]
+    quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.name != "nt":
+        subprocess.Popen(argv, start_new_session=True, **quiet)
+        return
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    try:   # leave Claude Code's job object, if it lets us, so closing the hook doesn't take the speaker along
+        subprocess.Popen(argv, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **quiet)
+    except OSError:
+        subprocess.Popen(argv, creationflags=flags, **quiet)
 
 
 def enqueue(text, lang, spawn=True):
@@ -199,8 +337,7 @@ def enqueue(text, lang, spawn=True):
         with open(QUEUE, "a", encoding="utf-8") as f:
             f.write(json.dumps({"text": text, "lang": lang}, ensure_ascii=False) + "\n")
     if spawn:
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "--speak-queue"], start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        start_speaker()
 
 
 def dequeue():
@@ -222,7 +359,7 @@ def dequeue():
 def speak_queue(say=None):
     """One speaker at a time. If something arrived between emptying the queue and releasing the lock, go again."""
     config, voices = load_config(), {}
-    say = say or speak
+    say = say or (lambda text, voice, lang: speak(text, voice, lang, config.get("command") or ""))
     while True:
         held = lock("speaker.lock", wait=False)
         if not held:
@@ -269,7 +406,7 @@ def spoken_name(folder):
 
 
 def desktop_session_folder():
-    """Folder the session started in, from the Claude desktop app's own session record.
+    """Folder the session started in, from the Claude desktop app's own session record (macOS).
 
     This file is internal to the app and has no contract: if it moves or changes, the other sources take over.
     """
@@ -316,15 +453,17 @@ def hook(stdin_text):
     shows up in the session, and a notification is not worth that."""
     try:
         payload = json.loads(stdin_text or "{}")
-        if not is_mac() or not ENABLED.exists() or payload.get("stop_hook_active") \
+        if not ENABLED.exists() or payload.get("stop_hook_active") \
                 or os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):   # claude -p and the SDK stay quiet
             return ""
         config = load_config()
+        if not can_speak(config):   # no engine and no program: no instruction either, so no tokens are spent
+            return ""
         lang = language(config)
         event = payload.get("hook_event_name", "")
         if event == "UserPromptSubmit":
-            return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": INSTRUCTION[lang]}},
-                              ensure_ascii=False)
+            # ASCII-only JSON: the 🔊 travels as an escape, safe on any console encoding
+            return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": INSTRUCTION[lang]}})
         project = spoken_name(session_folder(payload))
         text = announcement(event, payload, project, lang)
         kind = payload.get("notification_type") or ""
@@ -338,12 +477,29 @@ def hook(stdin_text):
 
 # --- /voice-notify -------------------------------------------------------------------------------------------
 
+NO_ENGINE = {
+    "linux": "No speech engine found. Install speech-dispatcher (spd-say) or espeak-ng, or set your own program "
+             "with /voice-notify command <program>.",
+    "windows": "Windows PowerShell (powershell.exe) was not found. Set your own program with "
+               "/voice-notify command <program>.",
+}
+
+
+def engine_line(config):
+    if config.get("command"):
+        return f"speaks with: your program `{config['command']}` (falls back to {system_engine() or 'nothing'})"
+    return f"speaks with: {system_engine() or 'nothing'}"
+
+
 def status():
     config = load_config()
     lang = language(config)
     out = [f"voice notifications: {'ON' if ENABLED.exists() else 'off'}",
            f"language: {lang}" + ("" if config.get("language") in LANGUAGES else " (auto, from the system)"),
-           f"voice: {config.get('voice') or (chosen_voice(lang, config) or 'system default') + ' (auto)'}"]
+           f"voice: {config.get('voice') or (chosen_voice(lang, config) or 'engine default') + ' (auto)'}",
+           engine_line(config)]
+    if not can_speak(config):
+        out.append(NO_ENGINE.get(system(), "Nothing can speak here. Set a program with /voice-notify command <program>."))
     if QUEUE.exists() and QUEUE.stat().st_size:
         out.append(f"queued: {len(QUEUE.read_text(encoding='utf-8').splitlines())}")
     if LOG.exists():
@@ -354,30 +510,41 @@ def status():
 def list_voices():
     config = load_config()
     lang = language(config)
+    engine = system_engine()
+    if engine in ("spd-say", "espeak-ng"):
+        listing = run(["spd-say", "-L"] if engine == "spd-say" else ["espeak-ng", f"--voices={lang.split('-')[0]}"])
+        return "\n".join([f"{engine} voices (the engine picks one for {lang} unless you choose):",
+                          listing.stdout.rstrip() or "  (none listed)", "",
+                          "Pick one with: /voice-notify voice <name>   (or /voice-notify voice auto)"])
     voices = sorted((v for v in installed_voices() if v[2].lower().startswith(lang.lower())),
                     key=lambda v: voice_rank(v, lang), reverse=True)
     current = chosen_voice(lang, config)
     rows = [f"{'*' if v[0] == current else ' '} {v[0]}  ({v[1]}, {v[2]}, {QUALITY.get(v[3], v[3])})" for v in voices]
-    return "\n".join([f"voices for {lang} (* = in use):"] + (rows or ["  none installed"]) + [
-        "",
-        "More voices: System Settings > Accessibility > Spoken Content > System voice > Manage Voices.",
-        "Pick one with: /voice-notify voice <identifier>   (or /voice-notify voice auto)"])
+    more = {"avspeech": "More voices: System Settings > Accessibility > Spoken Content > System voice > Manage Voices.",
+            "sapi": "More voices: Settings > Time & language > Speech > Manage voices > Add voices."}.get(engine, "")
+    return "\n".join([f"voices for {lang} (* = in use):"] + (rows or ["  none found"]) + [
+        "", more, "Pick one with: /voice-notify voice <identifier>   (or /voice-notify voice auto)"]).replace("\n\n\n", "\n\n")
 
 
-USAGE = """usage: /voice-notify [on [voice] | off | test | voices | status | lang <en|pt-BR|auto> | voice <identifier|auto>]"""
+def join_args(args):
+    """Rebuilds a command line from the words the shell split, quoting for the shell that will run it."""
+    return subprocess.list2cmdline(args) if system() == "windows" else " ".join(shlex.quote(a) for a in args)
+
+
+USAGE = ("usage: /voice-notify [on [voice] | off | test | voices | status | lang <en|pt-BR|auto> | "
+         "voice <name|auto> | command <program...|off>]")
 
 
 def command(args):
     """The /voice-notify command. Returns the text the command shows."""
-    if not is_mac():
-        return ("claude-voice-notify speaks through the macOS speech engine, so v0.1 works on macOS only. "
-                "On this system the hooks do nothing.")
     action, rest = (args[0].lower(), args[1:]) if args else ("status", [])
     if action == "on":
         STATE.mkdir(parents=True, exist_ok=True)
         if rest:
-            save_config(voice=rest[0])
+            save_config(voice=" ".join(rest))
         ENABLED.write_text("", encoding="utf-8")
+        if not can_speak():
+            return status()
         lang = language()
         enqueue(PHRASES[lang]["on"], lang)
         return status() + "\n\nApplies from your next message, in every open session."
@@ -385,6 +552,8 @@ def command(args):
         ENABLED.unlink(missing_ok=True)
         return status()
     if action == "test":
+        if not can_speak():
+            return status()
         lang = language()
         enqueue(f"{random.choice(PHRASES[lang]['done_summary']).format(p=spoken_name(session_folder({})))} "
                 f"{PHRASES[lang]['test']}", lang)
@@ -395,7 +564,10 @@ def command(args):
         save_config(language=rest[0])
         return status()
     if action == "voice" and rest:
-        save_config(voice="" if rest[0] == "auto" else rest[0])
+        save_config(voice="" if rest == ["auto"] else " ".join(rest))
+        return status()
+    if action == "command" and rest:
+        save_config(command="" if rest == ["off"] else join_args(rest))
         return status()
     if action == "status":
         return status()
@@ -404,13 +576,17 @@ def command(args):
 
 def main(argv):
     if argv[:1] == ["hook"]:
-        out = hook(sys.stdin.read())
+        # Read bytes: the hook input is UTF-8 whatever the console encoding (Windows uses a code page)
+        out = hook(sys.stdin.buffer.read().decode("utf-8", "replace"))
         if out:
             print(out)
     elif argv[:1] == ["--speak-queue"]:
-        if is_mac():
-            speak_queue()
+        speak_queue()
     else:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
         print(command(argv))
 
 
